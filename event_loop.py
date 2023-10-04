@@ -3,6 +3,7 @@ import datetime
 import logging
 import signal
 import sys
+import time
 from asyncio import StreamReader, StreamWriter
 from time import sleep
 
@@ -20,17 +21,36 @@ async def signal_handler():
 
 clients = []
 
+class ConnectedClient:
+    def __init__(self, writer: StreamWriter):
+        self.writer = writer
+        self.get_msg()
+
+    def get_msg(self):
+        self.last_message_at = time.time()
+
+    async def write(self, data: str):
+        self.writer.write(data)
+        await self.writer.drain()
+
 async def handle_client(reader, writer):
-    clients.append(writer)
+    client = ConnectedClient(writer)
+    clients.append(client)
+    await listen_loop(client, reader, writer)
+
+
+async def listen_loop(client, reader, writer):
     try:
         while True:
             data = await reader.read(100)
+            client.get_msg()
             if not data:
                 break
     finally:
-        clients.remove(writer)
+        clients.remove(client)
         writer.close()
         await writer.wait_closed()
+
 
 async def send_status():
     while True:
@@ -38,8 +58,17 @@ async def send_status():
         now = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         message = f'Current time: {now}, connected clients: {len(clients)}\n'
         for client in clients:
-            client.write(message.encode())
-            await client.drain()
+            await client.write(message.encode())
+            inactive_time = time.time() - client.last_message_at
+            if 10 > inactive_time > 5:
+                await client.write(b'You are inactive for 5 seconds, warning\n')
+            elif inactive_time > 10:
+                await client.write(b'You are inactive for 10 seconds, closing connection\n')
+                client.writer.close()
+                await client.writer.wait_closed()
+                clients.remove(client)
+                logger.info(f'Connection closed due to inactivity, {len(clients)} clients left')
+
 
 async def create_server():
     server = await asyncio.start_server(handle_client, '127.0.0.1', 8088)
